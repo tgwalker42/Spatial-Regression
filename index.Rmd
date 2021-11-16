@@ -1,0 +1,234 @@
+---
+title: "Spatial_regression"
+author: "Trevor Walker"
+date: "11/15/2021"
+output: html_document
+---
+
+```{r install packages, include=FALSE}
+packages <- c("biscale", "cleangeo", "cowplot", "dplyr", "geosphere", 
+              "ggplot2", "maps", "maptools", "rgdal", "rgeos", "sf", 
+              "sp", "spatialreg", "spdep", "tidyr")
+sapply(packages, require, character.only=T)
+```
+
+## Spatial Regression Models 
+
+
+
+```{r data, include=FALSE}
+data <- read.csv('https://raw.githubusercontent.com/chrismgentry/Spatial-Regression/master/Data/childpov18_southfull.csv', 
+                 colClasses = c("character", "character", "character", 
+                                "numeric", "numeric", "numeric", "numeric",
+                                "numeric", "numeric", "numeric", "numeric",
+                                "numeric", "numeric", "numeric", "numeric", 
+                                "numeric", "numeric", "numeric", "numeric",
+                                "numeric", "numeric", "numeric", "numeric",
+                                "numeric", "numeric", "numeric", "numeric", 
+                                "numeric", "numeric", "numeric", "numeric",
+                                "numeric", "numeric", "numeric", "numeric"))
+```
+
+
+
+```{r Subsetting NC, echo=TRUE}
+names(data)[names(data)=="X2016.child.poverty"] <- "child.pov.2016"
+
+nc_pov <- data %>% subset(State == "NC")
+
+summary(nc_pov)
+```
+
+```{r building equation, include=FALSE }
+
+equation <- child.pov.2016 ~ rural + urban + lnmanufacturing + lnag + 
+  lnretail + lnhealthss + lnconstruction + lnlesshs + 
+  lnunemployment + lnsinglemom + lnblack + lnhispanic + 
+  lnuninsured + lnincome_ratio + lnteenbirth + lnunmarried
+
+
+options(scipen = 5)
+```
+
+Here is the OLS Summary
+```{r, ols summary, include=TRUE}
+ols <- lm(equation, data=nc_pov)
+summary(ols)
+```
+
+```{r fips, include=FALSE}
+fips <- county.fips
+fips.codes <- separate(data = fips, col = polyname, into = c("state", "county"), sep = ",")
+nc_fips <- subset(fips.codes, state=="north carolina", select=fips)
+
+northcarolina <- map(database = "county", regions = "north carolina", fill=T, plot=F)
+nc_sp = map2SpatialPolygons(northcarolina,nc_fips$fips,CRS("+proj=longlat"))
+
+sf::sf_use_s2(FALSE)
+
+
+
+cleaned <- clgeo_Clean(nc_sp)
+neighb.data <- poly2nb(cleaned, queen=T)
+cont.neighb <- nb2listw(neighb.data,style="W", zero.policy = TRUE)
+```
+
+Moran and LM Tests
+```{r Tests, include=TRUE}
+lm.morantest(ols, cont.neighb)
+
+
+
+lm.LMtests(ols, cont.neighb, test="all")
+```
+Neither were significant so I guess I am suppose to stop but for the sake of building a map I will continue
+
+Here is the SLX, LAG, and Error Model
+
+```{r SLX, include=TRUE}
+SLX.model <- spatialreg::lmSLX(equation, data=nc_pov, cont.neighb)
+summary(SLX.model)
+
+
+summary(spatialreg::impacts(SLX.model, cont.neighb), zstats = TRUE)[["pzmat"]]
+
+
+sp.lag.model <- spatialreg::lagsarlm(equation, data=nc_pov, cont.neighb)
+summary(sp.lag.model, Nagelkerke = TRUE)
+
+
+summary(spatialreg::impacts(sp.lag.model, listw = cont.neighb, R=100), zstats = TRUE)[["pzmat"]]
+
+sp.err.model <- spatialreg::errorsarlm(equation, data=nc_pov, cont.neighb)
+summary(sp.err.model, Nagelkerke = TRUE)
+```
+
+
+Next is the error model hausman Test
+
+```{r Haussman,include=TRUE}
+spatialreg::Hausman.test(sp.err.model)
+
+
+
+sd.err <- spatialreg::errorsarlm(equation, nc_pov, cont.neighb, etype = "emixed")
+sdm <- spatialreg::lagsarlm(equation, nc_pov, cont.neighb, type = "mixed")
+
+
+summary(sd.err, Nagelkerke = TRUE)
+
+
+summary(spatialreg::impacts(sd.err, listw = cont.neighb, R = 100), zstats = TRUE)[["pzmat"]]
+```
+
+```{r LR,include=TRUE}
+LR.Sarlm(sd.err,sp.err.model)
+
+
+all.xy <-centroid(nc_sp)
+colnames(all.xy) <- c("x","y")
+```
+
+```{r neighbors, include=FALSE}
+#Create neighbors
+all.dist.k1 <- knn2nb(knearneigh(all.xy, k=1, longlat = TRUE))
+all.dist.k3 <- knn2nb(knearneigh(all.xy, k=3, longlat = TRUE))
+all.dist.k5 <- knn2nb(knearneigh(all.xy, k=5, longlat = TRUE))
+
+#Determine max k distance value to neighbor
+all.max.k1 <- max(unlist(nbdists(all.dist.k1, all.xy, longlat=TRUE)))
+all.max.k3 <- max(unlist(nbdists(all.dist.k3, all.xy, longlat=TRUE)))
+all.max.k5 <- max(unlist(nbdists(all.dist.k5, all.xy, longlat=TRUE)))
+
+#Calculate neighbors based on distance
+all.sp.dist.k1 <- dnearneigh(all.xy, d1=0, d2=1 * all.max.k1, longlat = TRUE)
+all.sp.dist.k3 <- dnearneigh(all.xy, d1=0, d2=1 * all.max.k3, longlat = TRUE)
+all.sp.dist.k5 <- dnearneigh(all.xy, d1=0, d2=1 * all.max.k5, longlat = TRUE)
+
+#Create neighbor list
+all.dist.neighb.k1 <- nb2listw(all.sp.dist.k1,style="W", zero.policy = TRUE)
+all.dist.neighb.k3 <- nb2listw(all.sp.dist.k3,style="W", zero.policy = TRUE)
+all.dist.neighb.k5 <- nb2listw(all.sp.dist.k5,style="W", zero.policy = TRUE)
+
+
+all.dist.lag.k1 <- spatialreg::lagsarlm(equation, data = nc_pov, listw = all.dist.neighb.k1)
+all.dist.lag.k3 <- spatialreg::lagsarlm(equation, data = nc_pov, listw = all.dist.neighb.k3)
+all.dist.lag.k5 <- spatialreg::lagsarlm(equation, data = nc_pov, listw = all.dist.neighb.k5)
+```
+Spatial Durbin Error Model Summary
+```{r summary, include=TRUE}
+summary(all.dist.lag.k1, Nagelkerke = TRUE)
+```
+Spatial Regression Analysis Model
+```{r spatial reg,include=FALSE}
+all.dist.err.k1 <- spatialreg::errorsarlm(equation, data = nc_pov, listw = all.dist.neighb.k1)
+all.dist.err.k3 <- spatialreg::errorsarlm(equation, data = nc_pov, listw = all.dist.neighb.k3)
+all.dist.err.k5 <- spatialreg::errorsarlm(equation, data = nc_pov, listw = all.dist.neighb.k5)
+
+summary(all.dist.err.k1, Nagelkerke = TRUE)
+```
+Mapping the Results
+```{r distance err,include= TRUE}
+dist.err.data <- summary(all.dist.err.k1, correlation=TRUE, Nagelkerke = TRUE)
+
+dist.err.output <- cbind.data.frame(nc_pov$FIPS,
+                                    dist.err.data$fitted.values, 
+                                    dist.err.data$residual, 
+                                    nc_pov$child.pov.2016, 
+                                    nc_pov$lnretail, 
+                                    nc_pov$lnsinglemom, 
+                                    nc_pov$lnuninsured, 
+                                    nc_pov$lnincome_ratio,
+                                    stringsAsFactors = FALSE)
+
+
+colnames(dist.err.output) <- c("fips","fitted","resid","childpov",
+                               "retail","single_mom","uninsured","income_ratio")
+nc_fortify <- fortify(nc_sp)
+
+nc_poly <- merge(x = nc_fortify, y = dist.err.output, 
+                 by.x = "id", by.y = "fips", all = TRUE)
+
+bivariate_data <- bi_class(nc_poly, x = childpov, y = retail, 
+                           dim = 3, style = "quantile")
+
+legend <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "Child Poverty",
+                    ylab = "Households w/ Retail Jobs" ,
+                    size = 6)
+
+
+world <- map_data("world")
+states <- map_data("state")
+southern_states <- subset(states, region %in% 
+                            c("texas", "arkansas", "louisiana", "mississippi", 
+                              "alabama", "georgia", "florida", "north carolina",
+                              "south carolina", "tennessee", "oklahoma", 
+                              "kentucky", "west virginia", "virginia", 
+                              "maryland", "delaware", "district of columbia"))
+nc_pov_map <- ggplot() + 
+  geom_polygon(data = world, aes(x=long,y=lat, group=group), fill = "gray95", color = "white") +
+  geom_polygon(data = states, aes(x=long,y=lat, group=group), fill = "gray", color = "white") +
+  geom_polygon(data = southern_states, aes(x=long,y=lat, group=group), fill = NA, size = 0.01, color = "white") +  
+  geom_polygon(data = bivariate_data, aes(x=long, y=lat, group=group, fill = bi_class), color = "grey50", show.legend = FALSE) + 
+  bi_scale_fill(pal = "DkViolet", dim = 3) +
+  coord_map("conic", lat0 = 30, xlim=c(-84,-76), ylim=c(34,37)) +
+  theme_void() + theme(legend.title.align=0.5) +
+  theme(panel.background = element_rect(fill = 'deepskyblue'),
+        panel.grid.major = element_line(colour = NA)) +
+  labs(x = "Longitude", y = "Latitude", fill = "Child Poverty", 
+       title = "Bivariate Map of Child Poverty and Parents with Jobs in Retail") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+nc_pov_map
+```
+Then the Final Map
+```{r final,include=TRUE}
+
+final_map <- ggdraw() +
+  draw_plot(nc_pov_map, 0, 0, 1, 1) +
+  draw_plot(legend, .1, 0.15, 0.28, .23)
+final_map
+```
+
